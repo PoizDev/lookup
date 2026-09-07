@@ -1,0 +1,32 @@
+# Internal planning
+PLAN.md
+IMPLEMENTATION.md
+docs/plans/
+docs/specs/
+docs/superpowers/
+
+# Build output
+/lookup
+/lookup.exe
+dist/
+bin/
+coverage.out
+*.test
+
+# Generated Lookup and analysis output
+graphify-out/
+*.sarif
+lookup-report.*
+lookup_review.md
+
+# Scratch files
+/test.md
+/parse_test.go
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

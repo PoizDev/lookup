@@ -1,0 +1,109 @@
+# Required caller permissions: contents: read, security-events: write.
+name: Lookup Code Analysis
+description: Scan a repository with a verified Lookup release and optionally upload SARIF
+author: poizdev
+branding: {icon: search, color: purple}
+
+inputs:
+  version: {description: 'Lookup release tag or latest', required: false, default: latest}
+  path: {description: 'Repository path to scan', required: false, default: '.'}
+  provider: {description: 'openai, anthropic, gemini, ollama, or empty for config default', required: false, default: ''}
+  api-key: {description: 'Provider API key from GitHub Secrets; not required for Ollama', required: false, default: ''}
+  args: {description: 'Additional Lookup CLI arguments', required: false, default: ''}
+  upload-sarif: {description: 'Upload results to GitHub Code Scanning', required: false, default: 'true'}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Lookup release
+      id: release
+      shell: bash
+      env: {INPUT_VERSION: '${{ inputs.version }}'}
+      run: |
+        version="$INPUT_VERSION"
+        if [[ "$version" == latest ]]; then
+          version="$(curl -sSfL https://api.github.com/repos/poizdev/lookup/releases/latest | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p')"
+        fi
+        [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || { echo 'Invalid Lookup version' >&2; exit 2; }
+        echo "tag=$version" >> "$GITHUB_OUTPUT"
+        echo "number=${version#v}" >> "$GITHUB_OUTPUT"
+    - name: Download and verify Lookup
+      id: download
+      shell: bash
+      env:
+        RELEASE_TAG: '${{ steps.release.outputs.tag }}'
+        RELEASE_VERSION: '${{ steps.release.outputs.number }}'
+      run: |
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64) target=linux_amd64_musl; extension=tar.gz ;;
+          Linux/ARM64) target=linux_arm64_musl; extension=tar.gz ;;
+          macOS/X64) target=darwin_amd64; extension=tar.gz ;;
+          macOS/ARM64) target=darwin_arm64; extension=tar.gz ;;
+          Windows/X64) target=windows_amd64; extension=zip ;;
+          *) echo "Unsupported runner: $RUNNER_OS/$RUNNER_ARCH" >&2; exit 2 ;;
+        esac
+        archive="lookup_${RELEASE_VERSION}_${target}.${extension}"
+        base="https://github.com/poizdev/lookup/releases/download/${RELEASE_TAG}"
+        tool_dir="$(mktemp -d "$RUNNER_TEMP/lookup.XXXXXX")"
+        curl -sSfL "$base/$archive" -o "$tool_dir/$archive"
+        curl -sSfL "$base/checksums.txt" -o "$tool_dir/checksums.txt"
+        expected="$(awk -v file="$archive" '$2 == file {print $1}' "$tool_dir/checksums.txt")"
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual="$(sha256sum "$tool_dir/$archive" | awk '{print $1}')"
+        elif command -v shasum >/dev/null 2>&1; then
+          actual="$(shasum -a 256 "$tool_dir/$archive" | awk '{print $1}')"
+        else
+          echo 'Lookup checksum verification requires sha256sum or shasum' >&2
+          exit 1
+        fi
+        [[ -n "$expected" && "$actual" == "$expected" ]] || { echo 'Lookup checksum verification failed' >&2; exit 1; }
+        echo "archive=$archive" >> "$GITHUB_OUTPUT"
+        echo "tool-dir=$tool_dir" >> "$GITHUB_OUTPUT"
+    - name: Extract Lookup on Unix
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        TOOL_DIR: '${{ steps.download.outputs.tool-dir }}'
+        DOWNLOADED_ARCHIVE: '${{ steps.download.outputs.archive }}'
+      run: |
+        tar -xzf "$TOOL_DIR/$DOWNLOADED_ARCHIVE" -C "$TOOL_DIR"
+        chmod +x "$TOOL_DIR/lookup"
+        echo "$TOOL_DIR" >> "$GITHUB_PATH"
+    - name: Extract Lookup on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        TOOL_DIR: '${{ steps.download.outputs.tool-dir }}'
+        DOWNLOADED_ARCHIVE: '${{ steps.download.outputs.archive }}'
+      run: |
+        Expand-Archive -LiteralPath (Join-Path $env:TOOL_DIR $env:DOWNLOADED_ARCHIVE) -DestinationPath $env:TOOL_DIR -Force
+        $env:TOOL_DIR | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+    - name: Configure AI provider
+      shell: bash
+      env:
+        INPUT_PROVIDER: '${{ inputs.provider }}'
+        INPUT_API_KEY: '${{ inputs.api-key }}'
+      run: |
+        [[ "$INPUT_API_KEY" != *$'\n'* && "$INPUT_API_KEY" != *$'\r'* ]] || { echo 'API key contains an invalid newline' >&2; exit 2; }
+        if [[ -n "$INPUT_PROVIDER" ]]; then echo "LOOKUP_PROVIDER=$INPUT_PROVIDER" >> "$GITHUB_ENV"; fi
+        if [[ -n "$INPUT_API_KEY" ]]; then
+          echo "::add-mask::$INPUT_API_KEY"
+          case "$INPUT_PROVIDER" in
+            openai) name=LOOKUP_OPENAI_API_KEY;; anthropic) name=LOOKUP_ANTHROPIC_API_KEY;; gemini) name=LOOKUP_GEMINI_API_KEY;;
+            *) echo 'api-key requires provider openai, anthropic, or gemini' >&2; exit 2;;
+          esac
+          echo "$name=$INPUT_API_KEY" >> "$GITHUB_ENV"
+        fi
+    - name: Run Lookup SARIF analysis
+      shell: bash
+      env:
+        LOOKUP_PATH: '${{ inputs.path }}'
+        LOOKUP_EXTRA_ARGS: '${{ inputs.args }}'
+      run: |
+        read -r -a extra_args <<< "$LOOKUP_EXTRA_ARGS"
+        lookup "$LOOKUP_PATH" --output sarif "${extra_args[@]}" > "$RUNNER_TEMP/lookup-results.sarif"
+        jq . "$RUNNER_TEMP/lookup-results.sarif" >/dev/null
+    - name: Upload SARIF
+      if: inputs.upload-sarif == 'true'
+      uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4
+      with: {sarif_file: '${{ runner.temp }}/lookup-results.sarif'}

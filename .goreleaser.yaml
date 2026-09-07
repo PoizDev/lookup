@@ -1,0 +1,71 @@
+version: 2
+
+builds:
+  - id: lookup
+    main: ./cmd/lookup
+    binary: lookup
+    env:
+      - CGO_ENABLED=1
+    flags:
+      - -trimpath
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}}
+    overrides:
+      - goos: linux
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=musl-gcc
+        ldflags:
+          - -s -w -linkmode external -extldflags '-static' -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}}
+      - goos: linux
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=musl-gcc
+        ldflags:
+          - -s -w -linkmode external -extldflags '-static' -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}}
+      - goos: windows
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=gcc
+
+archives:
+  - id: lookup
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: >-
+      lookup_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if eq .Os "linux" }}_musl{{ end }}
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+
+release:
+  github:
+    owner: poizdev
+    name: lookup
+  prerelease: auto

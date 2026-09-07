@@ -1,0 +1,222 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+env:
+  GORELEASER_VERSION: v2.17.1
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with: {go-version-file: go.mod, cache: true}
+      - name: Validate SemVer tag
+        run: '[[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]'
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: go build ./...
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with: {version: '${{ env.GORELEASER_VERSION }}', args: check}
+
+  linux-build:
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goarch: amd64, runner: ubuntu-24.04}
+          - {goarch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with: {go-version-file: go.mod, cache: true}
+      - run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with: {version: '${{ env.GORELEASER_VERSION }}', args: 'build --single-target --clean'}
+        env: {GOOS: linux, GOARCH: '${{ matrix.goarch }}'}
+      - name: Validate static linkage and smoke
+        run: |
+          binary="$(find dist -type f -name lookup -perm -111 -print -quit)"
+          test -n "$binary"
+          file "$binary"
+          if readelf -d "$binary" 2>/dev/null | grep -q '(NEEDED)'; then exit 1; fi
+          "$binary" version
+          test "$("$binary" version --short)" = "${GITHUB_REF_NAME#v}"
+          "$binary" --help >/dev/null
+          mkdir fixture staging
+          printf 'package fixture\nfunc Run() {}\n' > fixture/main.go
+          "$binary" --no-ai fixture --output json | jq . >/dev/null
+          install -m755 "$binary" staging/lookup
+          tar -C staging -czf "lookup-linux-${{ matrix.goarch }}-musl.tar.gz" lookup
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lookup-linux-${{ matrix.goarch }}-musl
+          path: lookup-linux-${{ matrix.goarch }}-musl.tar.gz
+          if-no-files-found: error
+
+  linux-distro-smoke:
+    needs: linux-build
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+        distro: [ubuntu, debian, fedora, arch, alpine, nix]
+        exclude:
+          - {goarch: arm64, distro: arch}
+        include:
+          - {goarch: amd64, runner: ubuntu-24.04}
+          - {goarch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: {name: 'lookup-linux-${{ matrix.goarch }}-musl'}
+      - run: |
+          mkdir runtime fixture
+          tar -C runtime -xzf lookup-linux-${{ matrix.goarch }}-musl.tar.gz
+          chmod +x runtime/lookup
+          printf 'package fixture\nfunc Run() {}\n' > fixture/main.go
+      - id: image
+        run: |
+          case '${{ matrix.distro }}' in
+            ubuntu) image='ubuntu:24.04';; debian) image='debian:12-slim';;
+            fedora) image='fedora:42';; arch) image='archlinux:base';;
+            alpine) image='alpine:3.22';; nix) image='nixos/nix:latest';;
+          esac
+          echo "name=$image" >> "$GITHUB_OUTPUT"
+      - name: Smoke in target distro
+        run: |
+          mounts=(-v "$PWD/runtime/lookup:/usr/local/bin/lookup:ro" -v "$PWD/fixture:/fixture:ro")
+          image='${{ steps.image.outputs.name }}'
+          if [[ '${{ matrix.distro }}' == nix ]]; then
+            docker run --rm "${mounts[@]}" "$image" /usr/local/bin/lookup version
+            docker run --rm "${mounts[@]}" "$image" /usr/local/bin/lookup version --short
+            docker run --rm "${mounts[@]}" "$image" /usr/local/bin/lookup --help
+            docker run --rm "${mounts[@]}" "$image" /usr/local/bin/lookup --no-ai /fixture --output json | jq . >/dev/null
+          else
+            docker run --rm "${mounts[@]}" "$image" lookup version
+            docker run --rm "${mounts[@]}" "$image" lookup version --short
+            docker run --rm "${mounts[@]}" "$image" lookup --help
+            docker run --rm "${mounts[@]}" "$image" lookup --no-ai /fixture --output json | jq . >/dev/null
+          fi
+
+  macos-build:
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goarch: amd64, runner: macos-15-intel}
+          - {goarch: arm64, runner: macos-15}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with: {go-version-file: go.mod, cache: true}
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with: {version: '${{ env.GORELEASER_VERSION }}', args: 'build --single-target --clean'}
+        env: {GOOS: darwin, GOARCH: '${{ matrix.goarch }}', CGO_ENABLED: 1}
+      - name: Smoke and package
+        run: |
+          binary="$(find dist -type f -name lookup -perm -111 -print -quit)"
+          "$binary" version
+          test "$("$binary" version --short)" = "${GITHUB_REF_NAME#v}"
+          "$binary" --help >/dev/null
+          mkdir fixture staging
+          printf 'package fixture\nfunc Run() {}\n' > fixture/main.go
+          "$binary" --no-ai fixture --output json | jq . >/dev/null
+          cp "$binary" staging/lookup
+          chmod +x staging/lookup
+          tar -C staging -czf "lookup-darwin-${{ matrix.goarch }}.tar.gz" lookup
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: {name: 'lookup-darwin-${{ matrix.goarch }}', path: 'lookup-darwin-${{ matrix.goarch }}.tar.gz', if-no-files-found: error}
+
+  windows-build:
+    needs: quality
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with: {go-version-file: go.mod, cache: true}
+      - run: choco install mingw --yes --no-progress
+        shell: pwsh
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with: {version: '${{ env.GORELEASER_VERSION }}', args: 'build --single-target --clean'}
+        env: {GOOS: windows, GOARCH: amd64, CGO_ENABLED: 1, CC: gcc}
+      - name: Smoke and package
+        shell: pwsh
+        run: |
+          $binary = Get-ChildItem dist -Recurse -Filter lookup.exe | Select-Object -First 1
+          if (-not $binary) { throw 'lookup.exe was not produced' }
+          & $binary.FullName version
+          if ((& $binary.FullName version --short) -ne $env:GITHUB_REF_NAME.Substring(1)) { throw 'version mismatch' }
+          & $binary.FullName --help | Out-Null
+          New-Item -ItemType Directory fixture, staging | Out-Null
+          "package fixture`nfunc Run() {}`n" | Set-Content fixture/main.go
+          & $binary.FullName --no-ai fixture --output json | ConvertFrom-Json | Out-Null
+          Copy-Item $binary.FullName staging/lookup.exe
+          Compress-Archive staging/lookup.exe lookup-windows-amd64.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: {name: lookup-windows-amd64, path: lookup-windows-amd64.zip, if-no-files-found: error}
+
+  aggregate:
+    needs: [quality, linux-distro-smoke, macos-build, windows-build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: {pattern: 'lookup-*', path: downloaded}
+      - name: Aggregate archives and checksums
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir release
+          cp downloaded/lookup-linux-amd64-musl/*.tar.gz "release/lookup_${version}_linux_amd64_musl.tar.gz"
+          cp downloaded/lookup-linux-arm64-musl/*.tar.gz "release/lookup_${version}_linux_arm64_musl.tar.gz"
+          cp downloaded/lookup-darwin-amd64/*.tar.gz "release/lookup_${version}_darwin_amd64.tar.gz"
+          cp downloaded/lookup-darwin-arm64/*.tar.gz "release/lookup_${version}_darwin_arm64.tar.gz"
+          cp downloaded/lookup-windows-amd64/*.zip "release/lookup_${version}_windows_amd64.zip"
+          cd release && sha256sum lookup_* > checksums.txt
+      - name: Final candidate smoke
+        run: |
+          cd release && sha256sum --check checksums.txt && cd ..
+          mkdir candidate fixture
+          tar -C candidate -xzf "release/lookup_${GITHUB_REF_NAME#v}_linux_amd64_musl.tar.gz"
+          test "$(candidate/lookup version --short)" = "${GITHUB_REF_NAME#v}"
+          candidate/lookup --help >/dev/null
+          for shell in bash zsh fish powershell; do candidate/lookup completion "$shell" > "$shell.completion"; test -s "$shell.completion"; done
+          printf 'package fixture\nfunc Run() {}\n' > fixture/main.go
+          candidate/lookup --no-ai fixture --output json | jq . >/dev/null
+          candidate/lookup --no-ai fixture --output sarif > results.sarif
+          jq -e '.version == "2.1.0" and .runs[0].tool.driver.semanticVersion == "'"${GITHUB_REF_NAME#v}"'"' results.sarif >/dev/null
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: {name: 'lookup-release-${{ github.ref_name }}', path: 'release/*', if-no-files-found: error}
+
+  publish:
+    needs: aggregate
+    runs-on: ubuntu-24.04
+    permissions: {contents: write}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: {name: 'lookup-release-${{ github.ref_name }}', path: release}
+      - name: Publish GitHub prerelease
+        if: contains(github.ref_name, '-')
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --generate-notes --title "$GITHUB_REF_NAME"
+      - name: Publish final GitHub release
+        if: ${{ !contains(github.ref_name, '-') }}
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
