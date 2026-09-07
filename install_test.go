@@ -221,7 +221,7 @@ func TestInstallScriptInteractiveFailureStopsSpinner(t *testing.T) {
 		"PATH=" + f.fakeBin + ":/usr/bin:/bin",
 		"LOOKUP_VERSION=v0.1.0",
 		"LOOKUP_INSTALL_DIR=" + f.installDir,
-		"SHELL=/bin/zsh",
+		"SHELL=/bin/sh",
 		"USER=lookupfixture",
 		"TERM=xterm-256color",
 	}
