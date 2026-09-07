@@ -36,7 +36,44 @@ function Write-LookupWordmark {
     Write-Host "lookup"
 }
 
-function Write-LookupSuccess([string]$releaseVersion, [string]$installPath, [string]$installDir) {
+function Test-LookupPathContains([string]$PathValue, [string]$Directory) {
+    $candidate = $Directory.TrimEnd([char[]]'\/')
+    foreach ($entry in ($PathValue -split ';')) {
+        if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+        if ([string]::Equals($entry.TrimEnd([char[]]'\/'), $candidate, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Add-LookupToPath(
+    [string]$Directory,
+    [scriptblock]$GetUserPath = { [Environment]::GetEnvironmentVariable('Path', 'User') },
+    [scriptblock]$SetUserPath = { param($value) [Environment]::SetEnvironmentVariable('Path', $value, 'User') }
+) {
+    $userPath = & $GetUserPath
+    $persisted = $false
+    if (-not (Test-LookupPathContains $userPath $Directory)) {
+        if ([string]::IsNullOrEmpty($userPath) -or $userPath.EndsWith(';')) {
+            $newUserPath = $userPath + $Directory
+        } else {
+            $newUserPath = $userPath + ';' + $Directory
+        }
+        & $SetUserPath $newUserPath
+        $persisted = $true
+    }
+    if (-not (Test-LookupPathContains $env:Path $Directory)) {
+        if ([string]::IsNullOrEmpty($env:Path) -or $env:Path.EndsWith(';')) {
+            $env:Path = $env:Path + $Directory
+        } else {
+            $env:Path = $env:Path + ';' + $Directory
+        }
+    }
+    return $persisted
+}
+
+function Write-LookupSuccess([string]$releaseVersion, [string]$installPath, [string]$installDir, [bool]$pathAdded) {
     Write-LookupWordmark
     Write-Host ""
     if (Test-LookupUnicodeTerminal) {
@@ -48,7 +85,13 @@ function Write-LookupSuccess([string]$releaseVersion, [string]$installPath, [str
     Write-Host "Binary"
     Write-Host "  $installPath"
     Write-Host ""
-    if (($env:PATH -split ';') -contains $installDir) {
+    if (Test-LookupPathContains $env:Path $installDir) {
+        if ($pathAdded) {
+            Write-Host "Added $installDir to your user PATH. New terminals will inherit it."
+            Write-Host "It is also available in this PowerShell session."
+            Write-Host "If you launched this installer in a child PowerShell process, reopen your terminal."
+            Write-Host ""
+        }
         Write-Host "Get started"
         Write-Host "  lookup init"
         Write-Host ""
@@ -56,12 +99,6 @@ function Write-LookupSuccess([string]$releaseVersion, [string]$installPath, [str
         Write-Host "  lookup ."
         return
     }
-    Write-Warning "$installDir is not in PATH"
-    Write-Host ""
-    Write-Host "Add $installDir to your user PATH, then open a new terminal."
-    Write-Host ""
-    Write-Host "Then run:"
-    Write-Host "  lookup init"
 }
 
 if ($Version -eq "latest") {
@@ -92,7 +129,8 @@ try {
     New-Item -ItemType Directory -Force $receiptDir | Out-Null
     $receipt = @{ method = "official-installer"; install_path = $installPath; repository = "poizdev/lookup" } | ConvertTo-Json
     [IO.File]::WriteAllText($receiptPath, $receipt, (New-Object Text.UTF8Encoding($false)))
-    Write-LookupSuccess $releaseVersion $installPath $InstallDir
+    $pathAdded = Add-LookupToPath $InstallDir
+    Write-LookupSuccess $releaseVersion $installPath $InstallDir $pathAdded
 } finally {
     Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
 }
