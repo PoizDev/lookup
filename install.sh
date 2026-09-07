@@ -29,31 +29,34 @@ spinner_start() {
 }
 
 spinner_stop() {
-  status=$1
+  spinner_status=$1
   completion=${2:-}
   if [ -n "$spinner_pid" ]; then
-    kill "$spinner_pid" 2>/dev/null || true
-    wait "$spinner_pid" 2>/dev/null || true
+    kill "$spinner_pid" 2>/dev/null || :
+    wait "$spinner_pid" 2>/dev/null || :
     spinner_pid=
-    printf '\r                                                                                \r' >&2
+    printf '\r                                                                                \r' >&2 || :
   fi
-  if [ "$status" -eq 0 ] && [ -n "$completion" ]; then
-    printf '✓ %s\n' "$completion" >&2
+  if [ "$spinner_status" -eq 0 ] && [ -n "$completion" ]; then
+    printf '✓ %s\n' "$completion" >&2 || :
   fi
+  return 0
 }
 
 cleanup() {
-  status=$?
-  spinner_stop "$status" ""
-  rm -rf "$tmp_dir"
-  exit "$status"
+  exit_status=$?
+  trap - EXIT
+  spinner_stop "$exit_status" "" || :
+  rm -rf "$tmp_dir" || :
+  exit "$exit_status"
 }
 
 on_signal() {
+  signal_status=$1
   trap - EXIT
-  spinner_stop "$1" ""
-  rm -rf "$tmp_dir"
-  exit "$1"
+  spinner_stop "$signal_status" "" || :
+  rm -rf "$tmp_dir" || :
+  exit "$signal_status"
 }
 
 trap cleanup EXIT
@@ -65,13 +68,11 @@ run_phase() {
   message=$1
   completion=$2
   shift 2
-  spinner_start "$message"
-  set +e
-  "$@"
-  status=$?
-  set -e
-  spinner_stop "$status" "$completion"
-  return "$status"
+  spinner_start "$message" || :
+  command_status=0
+  "$@" || command_status=$?
+  spinner_stop "$command_status" "$completion" || :
+  return "$command_status"
 }
 
 download() {
