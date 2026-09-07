@@ -2,9 +2,9 @@
 
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/lookup-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="./docs/assets/lookup-light.svg">
-  <img alt="Lookup" src="./docs/assets/lookup-light.svg" width="460">
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/lookup-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="./docs/assets/lookup-light.png">
+  <img alt="Lookup" src="./docs/assets/lookup-light.png" width="460">
 </picture>
 
 ### Codebase intelligence from your terminal.
